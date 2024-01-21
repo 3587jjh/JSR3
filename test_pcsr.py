@@ -90,7 +90,7 @@ def test(model):
                     pred = model(lr, coord, cell)
                     total_flops += model.flops(lr.shape[-2:], hr.shape[-2]*hr.shape[-1])
                 else:
-                    pred, flops, ratio_easy = model(lr, coord, cell, diff_threshold)
+                    pred, diff, flops, ratio_easy = model(lr, coord, cell, diff_threshold)
                     total_flops += flops
                     total_ratio_easy += ratio_easy * num_patches
                 pred = pred * rgb_std + rgb_mean
@@ -109,7 +109,7 @@ def test(model):
                         pred = model(lrs[l:r], coord.repeat(r-l,1,1,1), cell.repeat(r-l,1))
                         total_flops += model.flops(lrs.shape[-2:], hrs.shape[-2]*hrs.shape[-1]) * (r-l)
                     else:
-                        pred, flops, ratio_easy = model(lrs[l:r], coord.repeat(r-l,1,1,1),
+                        pred, diff, flops, ratio_easy = model(lrs[l:r], coord.repeat(r-l,1,1,1),
                             cell.repeat(r-l,1), diff_threshold)
                         total_flops += flops
                         total_ratio_easy += ratio_easy * (r-l)
