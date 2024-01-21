@@ -99,7 +99,7 @@ class PCSR(nn.Module):
         feat = self.encoder(lr)
         diff = self.classifier(feat, coord, cell, lr=lr)
         diff = F.softmax(diff, dim=1)
-        #diff = 1 - torch.sqrt(1-diff) # make distribution uniform
+        diff_ret = diff.clone()
         flops = (self.encoder.flops(lr.shape[-2:]) + self.classifier.flops(h*w)) * b
 
         inp_light = self.light_sampler.make_inp(feat, coord, cell)\
@@ -129,4 +129,4 @@ class PCSR(nn.Module):
         pred = pred.view(b,h,w,3).permute(0,3,1,2) # (b,3,h,w)
         pred = pred + F.grid_sample(lr, coord.flip(-1), mode='bilinear',
             padding_mode='border', align_corners=False)
-        return pred, flops, ratio_easy
+        return pred, diff_ret, flops, ratio_easy
