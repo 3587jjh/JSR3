@@ -101,7 +101,7 @@ def prepare_training():
     return model, model_ref, optimizer, lr_scheduler, iter_start
 
 
-def valid(model, vd_name=None, diff_threshold=0.5):
+def valid(model, model_ref=None, vd_name=None, diff_threshold=0.5):
     model.eval()
     valid_loader = make_valid_loader(vd_name)
     psnrs = []
@@ -109,6 +109,7 @@ def valid(model, vd_name=None, diff_threshold=0.5):
     total_flops = 0
     if phase >= 2:
         total_ratio_easy = 0
+        total_label_acc = 0
 
     rgb_mean = torch.tensor(config['data_norm']['mean'], device='cuda').view(1,3,1,1)
     rgb_std = torch.tensor(config['data_norm']['std'], device='cuda').view(1,3,1,1)
@@ -125,9 +126,23 @@ def valid(model, vd_name=None, diff_threshold=0.5):
                 pred = model(lr, batch['coord'], batch['cell'])
                 total_flops += model.flops(lr.shape[-2:], hr.shape[-2]*hr.shape[-1])
             else:
-                pred, flops, ratio_easy = model(lr, batch['coord'], batch['cell'], diff_threshold)
+                pred, diff, flops, ratio_easy = model(lr, batch['coord'], batch['cell'], diff_threshold)
                 total_flops += flops
                 total_ratio_easy += ratio_easy
+
+                # evaluation between diff and label
+                pred_light, pred_heavy = model_ref(lr, batch['coord'], batch['cell'], both=True)
+                pred_light = pred_light * rgb_std + rgb_mean
+                pred_heavy = pred_heavy * rgb_std + rgb_mean
+
+                mae_light = torch.abs(pred_light - hr).mean(dim=1)
+                mae_heavy = torch.abs(pred_heavy - hr).mean(dim=1)
+                label = torch.where(mae_light < mae_heavy, 0, 1) # (b,h,w)
+
+                diff_easy, diff_hard = diff[:,0,:,:], diff[:,1,:,:]
+                acc = (((diff_easy > diff_hard) & (label == 0)).sum()\
+                    + ((diff_easy <= diff_hard) & (label == 1)).sum())/diff.numel()
+                total_label_acc += acc
             pred = pred * rgb_std + rgb_mean
 
         pred = utils.tensor2numpy(pred) # (h,w,3), range [0,255] 
@@ -144,7 +159,8 @@ def valid(model, vd_name=None, diff_threshold=0.5):
         return psnr, avg_flops
     else:
         avg_ratio_easy = total_ratio_easy / len(valid_loader)
-        return psnr, avg_flops, avg_ratio_easy
+        avg_label_acc = total_label_acc / len(valid_loader)
+        return psnr, avg_flops, avg_ratio_easy, avg_label_acc
 
 
 def main(config_, save_path):
@@ -175,15 +191,20 @@ def main(config_, save_path):
 
     iter_cur = iter_start
     timer = utils.Timer()
-    train_loss = utils.Averager()
     t_iter_start = timer.t()
 
     if phase <= 1:
-        loss_fn = nn.L1Loss()
+        loss_fn = nn.L1Loss()   
     else:
         loss_fn_rgb = nn.L1Loss()
         loss_fn_avg = nn.L1Loss()
         loss_fn_ce = nn.NLLLoss()
+        train_loss_rgb = utils.Averager()
+        train_loss_avg = utils.Averager()
+        train_loss_ce = utils.Averager()
+        train_label_acc = utils.Averager()
+        train_label_error = utils.Averager()
+    train_loss = utils.Averager()
 
     rgb_mean = torch.tensor(config['data_norm']['mean'], device='cuda').view(1,3,1,1)
     rgb_std = torch.tensor(config['data_norm']['std'], device='cuda').view(1,3,1,1)
@@ -218,24 +239,39 @@ def main(config_, save_path):
                     mae_heavy = torch.abs(pred_heavy - hr).mean(dim=1)
                     label = torch.where(mae_light < mae_heavy, 0, 1) # (b,h,w)
 
-                    tot_cnt = torch.ones(1, device=label.device) * label.numel() # (bhw,) 
-                    hard_cnt = label.sum() if config.get('use_ref_cnt') else tot_cnt * 1/2
+                    tot_cnt = torch.ones(1, device=label.device) * label.numel() # (bhw,)
+                    if config.get('use_ref_cnt'):
+                        hard_cnt = label.sum()
+                    else:
+                        hard_cnt_ratio = config.get('hard_cnt_ratio')
+                        if hard_cnt_ratio is None:
+                            hard_cnt_ratio = 0.5
+                        hard_cnt = tot_cnt * hard_cnt_ratio
                     easy_cnt = tot_cnt - hard_cnt
 
-                    print(int(easy_cnt.item()), int(hard_cnt.item()),
-                        int(diff[:,0,:,:].sum().item()),
-                        int(diff[:,1,:,:].sum().item()),
-                        (diff[:,0,:,:] > diff[:,1,:,:]).sum().item(),
-                        (diff[:,0,:,:] < diff[:,1,:,:]).sum().item())
+                    # evaluation between diff and label
+                    diff_easy, diff_hard = diff[:,0,:,:], diff[:,1,:,:]
+                    acc = (((diff_easy > diff_hard) & (label == 0)).sum()\
+                        + ((diff_easy <= diff_hard) & (label == 1)).sum())/tot_cnt
+                    train_label_acc.add(acc.item())
+                    
+                    error = (diff_hard - label) ** 2
+                    train_label_error.add(error.mean().item())
 
                 loss_rgb = loss_fn_rgb(pred, hr)
                 loss_avg = (loss_fn_avg(easy_cnt, diff[:,0,:,:].sum()) +\
                      loss_fn_avg(hard_cnt, diff[:,1,:,:].sum())) / tot_cnt
                 loss_ce = loss_fn_ce(torch.log(diff), label)
 
-                loss = config['loss_rgb_w'] * loss_rgb +\
-                    config['loss_avg_w'] * loss_avg+\
-                    config['loss_ce_w'] * loss_ce
+                loss_rgb *= config['loss_rgb_w']
+                loss_avg *= config['loss_avg_w']
+                loss_ce *= config['loss_ce_w']
+
+                train_loss_rgb.add(loss_rgb.item())
+                train_loss_avg.add(loss_avg.item())
+                train_loss_ce.add(loss_ce.item())
+
+                loss = loss_rgb + loss_avg+ loss_ce
 
             train_loss.add(loss.item())
             loss.backward()
@@ -243,6 +279,9 @@ def main(config_, save_path):
             lr_scheduler.step()
             
             model_ = model.module if n_gpus > 1 else model
+            if model_ref:
+                model_ref_ = model_ref.module if n_gpus > 1 else model_ref
+
             if iter_cur % iter_print == 0 or iter_cur % iter_save == 0:
                 # save current model state
                 model_spec = config['model']
@@ -259,7 +298,12 @@ def main(config_, save_path):
                 }
                 if iter_cur % iter_print == 0: # log
                     log_info = ['iter {}/{}'.format(iter_cur, iter_max)]
-                    log_info.append('train: loss={:.4f}'.format(train_loss.item()))
+                    if phase <= 1:
+                        log_info.append('train: loss={:.4f}'.format(train_loss.item()))
+                    else:
+                        log_info.append('train: loss={:.4f} | loss_rgb={:.4f} | loss_avg={:.4f} | loss_ce={:.4f} | label_acc={:.1f} % | label_error={:.4f}'\
+                            .format(train_loss.item(), train_loss_rgb.item(), train_loss_avg.item(), train_loss_ce.item(), 
+                                train_label_acc.item()*100, train_label_error.item()))
                     log_info.append('lr: {:.4e}'.format(lr_scheduler.get_last_lr()[0]))
 
                     t = timer.t()
@@ -269,6 +313,12 @@ def main(config_, save_path):
                     log_info.append('{} {}/{}'.format(t_iter, t_elapsed, t_all))
                     log(', '.join(log_info))
                     train_loss = utils.Averager()
+                    if phase >= 2:
+                        train_loss_rgb = utils.Averager()
+                        train_loss_avg = utils.Averager()
+                        train_loss_ce = utils.Averager()
+                        train_label_acc = utils.Averager()
+                        train_label_error = utils.Averager()
                     t_iter_start = timer.t()
                     torch.save(sv_file, os.path.join(save_path, 'iter_last.pth'))
 
@@ -281,12 +331,12 @@ def main(config_, save_path):
                     log('{} (x{}) | psnr({}): {:.2f} dB | flops (per patch): {:.2f}G'\
                         .format(valid_data_name, config['scale'], config['psnr_type'], psnr, flops/1e9))
                 else:
-                    psnr, flops, ratio_easy = valid(model_, diff_threshold=0)
-                    log('{} (x{}) | psnr({}): {:.2f} dB | flops (per patch): {:.2f}G | easy ratio (per patch): {:.1f} %'\
-                        .format(valid_data_name, config['scale'], config['psnr_type'], psnr, flops/1e9, ratio_easy*100))
-                    psnr, flops, ratio_easy = valid(model_, diff_threshold=0.5)
-                    log('{} (x{}) | psnr({}): {:.2f} dB | flops (per patch): {:.2f}G | easy ratio (per patch): {:.1f} %'\
-                        .format(valid_data_name, config['scale'], config['psnr_type'], psnr, flops/1e9, ratio_easy*100))
+                    psnr, flops, ratio_easy, label_acc = valid(model_, model_ref=model_ref_, diff_threshold=0)
+                    log('{} (x{}) | psnr({}): {:.2f} dB | flops (per patch): {:.2f}G | easy ratio (per patch): {:.1f} % | label_acc (per patch): {:.1f} %'\
+                        .format(valid_data_name, config['scale'], config['psnr_type'], psnr, flops/1e9, ratio_easy*100, label_acc*100))
+                    psnr, flops, ratio_easy, label_acc = valid(model_, model_ref=model_ref_, diff_threshold=0.5)
+                    log('{} (x{}) | psnr({}): {:.2f} dB | flops (per patch): {:.2f}G | easy ratio (per patch): {:.1f} % | label_acc (per patch): {:.1f} %'\
+                        .format(valid_data_name, config['scale'], config['psnr_type'], psnr, flops/1e9, ratio_easy*100, label_acc*100))
 
             if iter_cur == iter_max:
                 log('--- End training ---')
