@@ -89,7 +89,7 @@ optimizer:
 lr_scheduler:
   name: CosineAnnealingLR
   args:
-    T_max: 200000
+    T_max: 50000
     eta_min: 1.e-7
 
 loss_rgb_w: 1000
@@ -98,10 +98,10 @@ loss_ce_w: 0
 use_ref_cnt: false
 hard_cnt_ratio: 0.5 # when use_ref_cnt=false
 
-iter_max: 200000
-iter_print: 400
-iter_val: 20000
-iter_save: 40000
+iter_max: 50000
+iter_print: 100
+iter_val: 5000
+iter_save: 10000
 
 refer_path: save/carn-liif-pcsr-x4-phase1/iter_last.pth
 init_path: save/carn-liif-pcsr-x4-phase1/iter_last.pth
