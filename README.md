@@ -12,3 +12,6 @@
 
 # Test
 - python test_pcsr.py --config configs/carn-liif-pcsr-x4-phase2-B-x.yaml --batch_size 36 --diff_threshold 0.7
+
+# Save point
+- save/carn-liif-pcsr-x4-phase2-B-x/
