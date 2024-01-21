@@ -95,7 +95,8 @@ lr_scheduler:
 loss_rgb_w: 1000
 loss_avg_w: 0.3
 loss_ce_w: 0
-use_ref_cnt: true
+use_ref_cnt: false
+hard_cnt_ratio: 0.5 # when use_ref_cnt=false
 
 iter_max: 200000
 iter_print: 400
