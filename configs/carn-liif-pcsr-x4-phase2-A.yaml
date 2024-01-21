@@ -1,0 +1,107 @@
+scale: 4
+#seed: 0
+phase: 2
+
+train_dataset:
+  dataset:
+    name: paired-image-folders
+    args:
+      root_path_1: ../datasets/DIV2K_train_sub/HR/x4
+      root_path_2: ../datasets/DIV2K_train_sub/LR/x4
+  wrapper:
+    name: sr-implicit-paired
+    args:
+      augment: [hflip, vflip, dflip]
+  batch_size: 16
+
+valid_dataset:
+  dataset:
+    name: paired-image-folders
+    args:
+      root_path_1: ../datasets/DIV2K_valid_sub/HR/x4
+      root_path_2: ../datasets/DIV2K_valid_sub/LR/x4
+      # first_k: 2000
+  wrapper:
+    name: sr-implicit-paired
+    args:
+      augment: null
+
+test_dataset:
+  dataset:
+    name: paired-image-folders
+    args: # Test2K | Test4K | Test8K | urban100
+      root_path_1: ../datasets/Test2K/HR/x4
+      root_path_2: ../datasets/Test2K/LR/x4
+  wrapper:
+    name: sr-implicit-paired
+    args:
+      augment: null
+psnr_type: rgb
+patch_size: 32
+step: 28
+
+data_norm:
+  mean: [0.4488, 0.4371, 0.4040]
+  std : [1.0, 1.0, 1.0]
+
+model:
+  name: pcsr
+  args:
+    encoder_spec:
+      name: carn
+      args:
+        nf: 40
+        scale: 4
+        no_upsampling: true
+
+    light_sampler_spec:
+      name: liif-sampler
+      args:
+        imnet_spec:
+          name: mlp
+          args:
+            hidden_list: [40,40]
+
+    heavy_sampler_spec:
+      name: liif-sampler
+      args:
+        imnet_spec:
+          name: mlp
+          args:
+            hidden_list: [86,86,86,86]
+        feat_unfold: true
+
+    classifier_type: 0
+    classifier_spec:
+      name: liif-sampler
+      args:
+        imnet_spec:
+          name: mlp
+          args:
+            hidden_list: []
+        feat_unfold: false
+
+optimizer:
+  name: adam
+  args:
+    lr: 2.e-4
+
+lr_scheduler:
+  name: CosineAnnealingLR
+  args:
+    T_max: 200000
+    eta_min: 1.e-7
+
+loss_rgb_w: 1000
+loss_avg_w: 0.3
+loss_ce_w: 0
+use_ref_cnt: true
+
+iter_max: 200000
+iter_print: 400
+iter_val: 20000
+iter_save: 40000
+
+refer_path: save/carn-liif-pcsr-x4-phase1/iter_last.pth
+init_path: save/carn-liif-pcsr-x4-phase1/iter_last.pth
+resume_path: save/carn-liif-pcsr-x4-phase2-A/iter_last.pth ###
